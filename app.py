@@ -14,6 +14,8 @@ import base64
 import io
 import json
 import os
+import subprocess
+import sys
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,9 +62,34 @@ def salvar_config(config: Dict[str, Any]) -> None:
 
 def selecionar_pasta_dialog(caminho_inicial: str = "") -> Optional[str]:
     """
-    Abre um seletor de pasta nativo (Windows/Linux/Mac) via tkinter.
+    Abre um seletor de pasta nativo.
+    No Windows, usa PowerShell + FolderBrowserDialog (mais confiável no Streamlit).
+    Em outros sistemas, tenta tkinter.
     Retorna o caminho selecionado ou None se cancelado.
     """
+    if os.name == "nt":
+        try:
+            inicial = caminho_inicial.strip().replace("'", "''")
+            ps_script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Selecione a pasta raiz das fotos'
+if ('{inicial}' -ne '') {{ $dialog.SelectedPath = '{inicial}' }}
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+    Write-Output $dialog.SelectedPath
+}}
+"""
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            selecionada = (res.stdout or "").strip()
+            return selecionada if selecionada else None
+        except Exception:
+            return None
+
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -86,6 +113,43 @@ def url_valida(url: str) -> bool:
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
     except Exception:
         return False
+
+
+def normalizar_caminho_pasta(caminho_txt: str) -> Optional[Path]:
+    """Retorna Path absoluto da pasta ou None se inválido."""
+    if not (caminho_txt or "").strip():
+        return None
+    try:
+        p = Path(caminho_txt.strip()).expanduser()
+        if not p.is_absolute():
+            p = p.resolve(strict=False)
+        return p
+    except (OSError, RuntimeError):
+        return None
+
+
+def abrir_pasta_no_explorador(caminho_txt: str) -> Tuple[bool, str]:
+    """
+    Abre a pasta no gerenciador de arquivos do sistema (Explorer no Windows).
+    Links file:// no navegador costumam ser bloqueados; isto funciona ao rodar o app localmente.
+    """
+    p = normalizar_caminho_pasta(caminho_txt)
+    if p is None:
+        return False, "Caminho inválido."
+    if not p.exists():
+        return False, "Pasta não encontrada."
+    if not p.is_dir():
+        return False, "O caminho não é uma pasta."
+    try:
+        if os.name == "nt":
+            os.startfile(str(p))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(p)], start_new_session=True)
+        else:
+            subprocess.Popen(["xdg-open", str(p)], start_new_session=True)
+        return True, ""
+    except OSError as e:
+        return False, str(e)
 
 
 def dms_para_decimal(dms: Iterable[Any], ref: str) -> float:
@@ -249,6 +313,11 @@ def main() -> None:
             if selecionada:
                 st.session_state["pasta_raiz_input"] = selecionada
                 st.rerun()
+            else:
+                st.sidebar.warning(
+                    "Não foi possível abrir o seletor. "
+                    "Digite o caminho manualmente ou execute o app localmente no Windows."
+                )
     with col_save:
         if st.button("💾 Salvar pasta"):
             salvar_config(
@@ -259,9 +328,18 @@ def main() -> None:
             )
             st.sidebar.success("Caminho salvo no config.json.")
 
+    # Links file:// no navegador são bloqueados por segurança; usar botão que chama o SO.
     if pasta_raiz_txt.strip():
-        pasta_uri = Path(pasta_raiz_txt.strip()).as_uri()
-        st.sidebar.markdown(f"[📁 Abrir pasta atual]({pasta_uri})")
+        if st.sidebar.button("📁 Abrir pasta no Explorador", key="abrir_explorer_pasta"):
+            ok, msg = abrir_pasta_no_explorador(pasta_raiz_txt)
+            if ok:
+                st.sidebar.success("Pasta aberta no Explorador.")
+            else:
+                st.sidebar.error(msg)
+        st.sidebar.caption(
+            "No Windows, este botão abre a pasta no Explorador. "
+            "No Streamlit Cloud não abre no seu PC (o app roda em outro servidor)."
+        )
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🌐 OneDrive Web")
