@@ -14,6 +14,7 @@ import base64
 import io
 import json
 import os
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -55,6 +56,36 @@ def carregar_config() -> Dict[str, Any]:
 
 def salvar_config(config: Dict[str, Any]) -> None:
     CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def selecionar_pasta_dialog(caminho_inicial: str = "") -> Optional[str]:
+    """
+    Abre um seletor de pasta nativo (Windows/Linux/Mac) via tkinter.
+    Retorna o caminho selecionado ou None se cancelado.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        pasta = filedialog.askdirectory(
+            title="Selecione a pasta raiz das fotos",
+            initialdir=caminho_inicial if caminho_inicial else None,
+        )
+        root.destroy()
+        return pasta if pasta else None
+    except Exception:
+        return None
+
+
+def url_valida(url: str) -> bool:
+    try:
+        parsed = urlparse(url.strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    except Exception:
+        return False
 
 
 def dms_para_decimal(dms: Iterable[Any], ref: str) -> float:
@@ -199,16 +230,68 @@ def main() -> None:
     cfg = carregar_config()
     default_onedrive = os.environ.get("OneDrive", "")
     caminho_padrao = cfg.get("pasta_raiz_fotos") or default_onedrive
+    onedrive_web_padrao = cfg.get("onedrive_web_url", "")
+
+    if "pasta_raiz_input" not in st.session_state:
+        st.session_state["pasta_raiz_input"] = caminho_padrao
 
     st.sidebar.header("⚙️ Fonte das Fotos")
     pasta_raiz_txt = st.sidebar.text_input(
         "Pasta raiz (OneDrive local ou outra pasta)",
-        value=caminho_padrao,
+        key="pasta_raiz_input",
         help="Ex.: C:/Users/SEU_USUARIO/OneDrive/Inspecoes",
     )
 
+    col_sel, col_save = st.sidebar.columns(2)
+    with col_sel:
+        if st.button("📂 Selecionar pasta"):
+            selecionada = selecionar_pasta_dialog(pasta_raiz_txt)
+            if selecionada:
+                st.session_state["pasta_raiz_input"] = selecionada
+                st.rerun()
+    with col_save:
+        if st.button("💾 Salvar pasta"):
+            salvar_config(
+                {
+                    "pasta_raiz_fotos": st.session_state.get("pasta_raiz_input", ""),
+                    "onedrive_web_url": onedrive_web_padrao,
+                }
+            )
+            st.sidebar.success("Caminho salvo no config.json.")
+
+    if pasta_raiz_txt.strip():
+        pasta_uri = Path(pasta_raiz_txt.strip()).as_uri()
+        st.sidebar.markdown(f"[📁 Abrir pasta atual]({pasta_uri})")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🌐 OneDrive Web")
+    onedrive_web_url = st.sidebar.text_input(
+        "Link da pasta no OneDrive Web (opcional)",
+        value=onedrive_web_padrao,
+        help="Ex.: https://onedrive.live.com/... ou link de compartilhamento da pasta",
+    )
+
+    col_web1, col_web2 = st.sidebar.columns(2)
+    with col_web1:
+        if onedrive_web_url.strip() and url_valida(onedrive_web_url):
+            st.link_button("🔗 Abrir link", onedrive_web_url)
+    with col_web2:
+        if st.button("💾 Salvar link"):
+            salvar_config(
+                {
+                    "pasta_raiz_fotos": st.session_state.get("pasta_raiz_input", ""),
+                    "onedrive_web_url": onedrive_web_url.strip(),
+                }
+            )
+            st.sidebar.success("Link salvo no config.json.")
+
     if st.sidebar.button("💾 Salvar caminho padrão"):
-        salvar_config({"pasta_raiz_fotos": pasta_raiz_txt})
+        salvar_config(
+            {
+                "pasta_raiz_fotos": st.session_state.get("pasta_raiz_input", ""),
+                "onedrive_web_url": onedrive_web_url.strip(),
+            }
+        )
         st.sidebar.success("Caminho salvo no config.json.")
 
     pasta_raiz = Path(pasta_raiz_txt.strip()) if pasta_raiz_txt.strip() else None
@@ -217,6 +300,11 @@ def main() -> None:
         st.info(
             "Sugestão OneDrive: use a pasta local sincronizada pelo aplicativo OneDrive no Windows."
         )
+        if onedrive_web_url.strip():
+            st.caption(
+                "Link OneDrive Web configurado. "
+                "Observação: para leitura automática de EXIF via web, seria necessário integrar Microsoft Graph API."
+            )
         st.stop()
 
     subpastas = listar_subpastas_com_fotos(pasta_raiz)
